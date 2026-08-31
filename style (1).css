@@ -39,6 +39,17 @@ html, body {
 
 #hud {
   margin-top: 8px;
-  font-size: 13px;
-  color: #8a9a7a;
+  text-align: center;
+}
+
+#resource-hud {
+  font-size: 15px;
+  color: #b5c99a;
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+
+#hint-line {
+  font-size: 12px;
+  color: #6b7a5e;
 }
