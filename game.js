@@ -48,16 +48,40 @@ const BUILDABLES = {
 };
 
 // Day/night + zombie tuning
-const DAY_LENGTH_MS = 45000;   // how long daylight lasts
-const NIGHT_LENGTH_MS = 30000; // how long night lasts
+const DAY_LENGTH_MS = 45000;
+const NIGHT_LENGTH_MS = 30000;
 const ZOMBIE_SPEED = 55;
-const ZOMBIE_MAX_HEALTH = 2;   // hits to kill
+const ZOMBIE_MAX_HEALTH = 2;
 const PLAYER_MAX_HEALTH = 100;
-const ZOMBIE_DAMAGE = 8;       // damage per second while touching player
+const ZOMBIE_DAMAGE = 8;
 const ATTACK_RANGE = TILE * 0.9;
 const ATTACK_COOLDOWN_MS = 400;
 
+// Survivor perks: each recruited survivor applies a small passive bonus
+const PERKS = {
+  scavenger: {
+    label: 'Scavenger',
+    desc: '+1 to every resource gathered'
+  },
+  medic: {
+    label: 'Medic',
+    desc: 'slowly regenerates your health'
+  },
+  guard: {
+    label: 'Guard',
+    desc: 'reduces zombie damage to you'
+  }
+};
+
+// Hand-placed survivors waiting to be found on the map
+const survivorData = [
+  { name: 'Mara', perk: 'scavenger', col: 18, row: 12 },
+  { name: 'Doc Ellis', perk: 'medic', col: 1, row: 12 },
+  { name: 'Reyes', perk: 'guard', col: 9, row: 1 }
+];
+
 const inventory = { wood: 0, food: 0, scrap: 0 };
+const roster = []; // recruited survivors: { name, perk }
 
 function updateHud() {
   const el = document.getElementById('resource-hud');
@@ -87,13 +111,39 @@ function updateHealthBar(current, max) {
   if (label) label.textContent = `${Math.max(0, Math.ceil(current))} / ${max}`;
 }
 
+function hasPerk(perkKey) {
+  return roster.some(s => s.perk === perkKey);
+}
+
+function updateRosterPanel() {
+  const list = document.getElementById('roster-list');
+  const countEl = document.getElementById('roster-count');
+  if (countEl) countEl.textContent = roster.length;
+  if (!list) return;
+
+  if (roster.length === 0) {
+    list.innerHTML = '<div class="roster-empty">No survivors rescued yet.</div>';
+    return;
+  }
+
+  list.innerHTML = roster.map(s => {
+    const perkInfo = PERKS[s.perk];
+    return `<div class="roster-member">
+      <span class="roster-name">${s.name}</span>
+      <span class="roster-perk">${perkInfo.label} — ${perkInfo.desc}</span>
+    </div>`;
+  }).join('');
+}
+
 class MainScene extends Phaser.Scene {
   constructor() {
     super('MainScene');
     this.resourceNodes = [];
+    this.survivorSprites = [];
     this.interactKey = null;
     this.promptText = null;
     this.nearbyNode = null;
+    this.nearbySurvivor = null;
 
     this.buildMode = false;
     this.selectedBuild = 'wall';
@@ -101,17 +151,16 @@ class MainScene extends Phaser.Scene {
     this.placedStructures = null;
     this.occupiedTiles = new Set();
 
-    // Day/night state
     this.isNight = false;
     this.dayNumber = 1;
     this.phaseTimer = 0;
     this.nightOverlay = null;
 
-    // Zombies
     this.zombies = null;
     this.attackKey = null;
     this.lastAttackTime = 0;
     this.lastDamageTime = 0;
+    this.lastRegenTime = 0;
 
     this.playerHealth = PLAYER_MAX_HEALTH;
     this.gameOver = false;
@@ -124,6 +173,7 @@ class MainScene extends Phaser.Scene {
     this.createTileTexture('shelter', 0x6a8a4a);
     this.createPlayerTexture();
     this.createZombieTexture();
+    this.createSurvivorTexture();
 
     Object.entries(RESOURCE_CONFIG).forEach(([type, cfg]) => {
       this.createNodeTexture(type, cfg.color);
@@ -161,11 +211,28 @@ class MainScene extends Phaser.Scene {
     g.fillCircle(TILE / 2, TILE / 2, TILE / 2 - 5);
     g.lineStyle(2, 0x2a3a20, 1);
     g.strokeCircle(TILE / 2, TILE / 2, TILE / 2 - 5);
-    // simple eyes for character
     g.fillStyle(0x0d0f0c, 1);
     g.fillCircle(TILE / 2 - 5, TILE / 2 - 3, 2);
     g.fillCircle(TILE / 2 + 5, TILE / 2 - 3, 2);
     g.generateTexture('zombie', TILE, TILE);
+    g.destroy();
+  }
+
+  createSurvivorTexture() {
+    const g = this.make.graphics({ x: 0, y: 0, add: false });
+    g.fillStyle(0x5a86a8, 1);
+    g.fillCircle(TILE / 2, TILE / 2, TILE / 2 - 4);
+    g.lineStyle(2, 0x1e3a4a, 1);
+    g.strokeCircle(TILE / 2, TILE / 2, TILE / 2 - 4);
+    // small "+" marker to read as someone needing help / friendly
+    g.lineStyle(2, 0xe8e8d0, 1);
+    g.beginPath();
+    g.moveTo(TILE / 2 - 5, TILE / 2);
+    g.lineTo(TILE / 2 + 5, TILE / 2);
+    g.moveTo(TILE / 2, TILE / 2 - 5);
+    g.lineTo(TILE / 2, TILE / 2 + 5);
+    g.strokePath();
+    g.generateTexture('survivor', TILE, TILE);
     g.destroy();
   }
 
@@ -218,6 +285,30 @@ class MainScene extends Phaser.Scene {
       this.occupiedTiles.add(`${data.col},${data.row}`);
     });
 
+    // Place survivors waiting to be rescued (skip any already recruited from a prior session? no persistence yet)
+    survivorData.forEach(data => {
+      const x = data.col * TILE + TILE / 2;
+      const y = data.row * TILE + TILE / 2;
+      const sprite = this.add.image(x, y, 'survivor');
+      this.tweens.add({
+        targets: sprite,
+        y: y - 4,
+        duration: 700,
+        yoyo: true,
+        repeat: -1,
+        ease: 'Sine.easeInOut'
+      });
+      this.survivorSprites.push({
+        name: data.name,
+        perk: data.perk,
+        sprite,
+        x,
+        y,
+        rescued: false
+      });
+      this.occupiedTiles.add(`${data.col},${data.row}`);
+    });
+
     this.player = this.physics.add.sprite(3 * TILE, 3 * TILE, 'player');
     this.player.setCollideWorldBounds(true);
     this.player.body.setSize(TILE - 8, TILE - 8);
@@ -244,7 +335,7 @@ class MainScene extends Phaser.Scene {
     this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
     this.physics.world.setBounds(0, 0, MAP_W * TILE, MAP_H * TILE);
 
-    this.promptText = this.add.text(0, 0, 'Press E to gather', {
+    this.promptText = this.add.text(0, 0, '', {
       fontFamily: 'Courier New',
       fontSize: '12px',
       color: '#e8e8d0',
@@ -259,7 +350,6 @@ class MainScene extends Phaser.Scene {
     this.buildGhost.setVisible(false);
     this.buildGhost.setDepth(9);
 
-    // Night overlay - a rectangle that covers the whole map, fixed to camera
     this.nightOverlay = this.add.rectangle(0, 0, MAP_W * TILE * 2, MAP_H * TILE * 2, 0x0a0e14, 0);
     this.nightOverlay.setOrigin(0.5, 0.5);
     this.nightOverlay.setDepth(20);
@@ -270,6 +360,7 @@ class MainScene extends Phaser.Scene {
 
     updateHud();
     updateHealthBar(this.playerHealth, PLAYER_MAX_HEALTH);
+    updateRosterPanel();
     this.syncBuildMenu();
     this.startDay();
   }
@@ -302,13 +393,7 @@ class MainScene extends Phaser.Scene {
     this.isNight = false;
     this.phaseTimer = DAY_LENGTH_MS;
     updateStatusLine(`day ${this.dayNumber} — gather and build before nightfall`);
-    this.tweens.add({
-      targets: this.nightOverlay,
-      alpha: 0,
-      duration: 2000
-    });
-
-    // Clear any remaining zombies when day starts
+    this.tweens.add({ targets: this.nightOverlay, alpha: 0, duration: 2000 });
     this.zombies.getChildren().slice().forEach(z => z.destroy());
   }
 
@@ -316,16 +401,12 @@ class MainScene extends Phaser.Scene {
     this.isNight = true;
     this.phaseTimer = NIGHT_LENGTH_MS;
     updateStatusLine(`night ${this.dayNumber} — zombies are coming, defend yourself`);
-    this.tweens.add({
-      targets: this.nightOverlay,
-      alpha: 0.55,
-      duration: 3000
-    });
+    this.tweens.add({ targets: this.nightOverlay, alpha: 0.55, duration: 3000 });
     this.spawnZombieWave();
   }
 
   spawnZombieWave() {
-    const count = 3 + this.dayNumber; // gets harder each night
+    const count = 3 + this.dayNumber;
     for (let i = 0; i < count; i++) {
       this.time.delayedCall(i * 900, () => this.spawnZombie());
     }
@@ -333,8 +414,6 @@ class MainScene extends Phaser.Scene {
 
   spawnZombie() {
     if (this.gameOver) return;
-
-    // Spawn at a random edge of the map
     const edge = Phaser.Math.Between(0, 3);
     let x, y;
     if (edge === 0) { x = 0; y = Phaser.Math.Between(0, MAP_H * TILE); }
@@ -355,7 +434,8 @@ class MainScene extends Phaser.Scene {
     const now = this.time.now;
     if (now - this.lastDamageTime > 500) {
       this.lastDamageTime = now;
-      this.playerHealth -= ZOMBIE_DAMAGE;
+      const damage = hasPerk('guard') ? ZOMBIE_DAMAGE * 0.5 : ZOMBIE_DAMAGE;
+      this.playerHealth -= damage;
       updateHealthBar(this.playerHealth, PLAYER_MAX_HEALTH);
       this.cameras.main.shake(120, 0.004);
       if (this.playerHealth <= 0) {
@@ -400,7 +480,7 @@ class MainScene extends Phaser.Scene {
     }).setOrigin(0.5).setDepth(30);
   }
 
-  // ---------- Resources (unchanged from before) ----------
+  // ---------- Resources ----------
 
   getNearbyNode() {
     const GATHER_RANGE = TILE * 1.1;
@@ -421,7 +501,8 @@ class MainScene extends Phaser.Scene {
 
   gatherNode(node) {
     const cfg = RESOURCE_CONFIG[node.type];
-    const amount = Phaser.Math.Between(cfg.min, cfg.max);
+    const bonus = hasPerk('scavenger') ? 1 : 0;
+    const amount = Phaser.Math.Between(cfg.min, cfg.max) + bonus;
     inventory[cfg.key] += amount;
     updateHud();
 
@@ -436,6 +517,36 @@ class MainScene extends Phaser.Scene {
     });
 
     this.showFloatText(node.x, node.y, `+${amount} ${cfg.key}`);
+  }
+
+  // ---------- Survivors ----------
+
+  getNearbySurvivor() {
+    const RESCUE_RANGE = TILE * 1.1;
+    let closest = null;
+    let closestDist = Infinity;
+
+    this.survivorSprites.forEach(s => {
+      if (s.rescued) return;
+      const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, s.x, s.y);
+      if (dist < RESCUE_RANGE && dist < closestDist) {
+        closest = s;
+        closestDist = dist;
+      }
+    });
+
+    return closest;
+  }
+
+  rescueSurvivor(survivor) {
+    survivor.rescued = true;
+    survivor.sprite.destroy();
+    roster.push({ name: survivor.name, perk: survivor.perk });
+    updateRosterPanel();
+
+    const perkInfo = PERKS[survivor.perk];
+    this.showFloatText(survivor.x, survivor.y, `${survivor.name} rescued!`, '#7ab5d9');
+    updateStatusLine(`${survivor.name} joined you — ${perkInfo.label}: ${perkInfo.desc}`);
   }
 
   showFloatText(x, y, message, color) {
@@ -454,7 +565,7 @@ class MainScene extends Phaser.Scene {
     });
   }
 
-  // ---------- Building (unchanged from before) ----------
+  // ---------- Building ----------
 
   handlePointerDown(pointer) {
     if (!this.buildMode) return;
@@ -549,9 +660,20 @@ class MainScene extends Phaser.Scene {
         this.player.setVelocity((vx / len) * speed, (vy / len) * speed);
       }
 
-      this.nearbyNode = this.getNearbyNode();
+      // Prompt priority: survivor rescue takes precedence over resource gathering
+      this.nearbySurvivor = this.getNearbySurvivor();
+      this.nearbyNode = this.nearbySurvivor ? null : this.getNearbyNode();
 
-      if (this.nearbyNode) {
+      if (this.nearbySurvivor) {
+        this.promptText.setText(`Press E to rescue ${this.nearbySurvivor.name}`);
+        this.promptText.setVisible(true);
+        this.promptText.setPosition(this.nearbySurvivor.x - 55, this.nearbySurvivor.y - TILE - 6);
+
+        if (Phaser.Input.Keyboard.JustDown(this.interactKey)) {
+          this.rescueSurvivor(this.nearbySurvivor);
+        }
+      } else if (this.nearbyNode) {
+        this.promptText.setText('Press E to gather');
         this.promptText.setVisible(true);
         this.promptText.setPosition(this.nearbyNode.x - 40, this.nearbyNode.y - TILE - 6);
 
@@ -577,6 +699,15 @@ class MainScene extends Phaser.Scene {
       const len = Math.sqrt(dx * dx + dy * dy) || 1;
       zombie.setVelocity((dx / len) * ZOMBIE_SPEED, (dy / len) * ZOMBIE_SPEED);
     });
+
+    // Medic perk: slow passive regen
+    if (hasPerk('medic') && this.playerHealth < PLAYER_MAX_HEALTH) {
+      if (time - this.lastRegenTime > 2000) {
+        this.lastRegenTime = time;
+        this.playerHealth = Math.min(PLAYER_MAX_HEALTH, this.playerHealth + 2);
+        updateHealthBar(this.playerHealth, PLAYER_MAX_HEALTH);
+      }
+    }
 
     // Day/night timer
     this.phaseTimer -= delta;

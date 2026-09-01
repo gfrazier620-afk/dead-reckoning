@@ -127,3 +127,45 @@ html, body {
   color: #6b7a5e;
   margin-top: 4px;
 }
+
+#roster-panel {
+  margin-top: 12px;
+  padding: 10px 16px;
+  border: 2px solid #2a3a4a;
+  background: #10151a;
+  width: 260px;
+}
+
+#roster-header {
+  font-size: 13px;
+  color: #7ab5d9;
+  margin-bottom: 6px;
+  text-align: center;
+}
+
+.roster-empty {
+  font-size: 11px;
+  color: #4a5a6a;
+  text-align: center;
+}
+
+.roster-member {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+  border-top: 1px solid #1e2a33;
+}
+
+.roster-member:first-child {
+  border-top: none;
+}
+
+.roster-name {
+  font-size: 12px;
+  color: #c9d1c4;
+}
+
+.roster-perk {
+  font-size: 10px;
+  color: #6b7a5e;
+}
