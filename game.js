@@ -41,6 +41,12 @@ const RESOURCE_CONFIG = {
   car: { key: 'scrap', color: 0x6a6a72, min: 2, max: 4, respawnMs: 18000 }
 };
 
+// Buildable structures and their costs
+const BUILDABLES = {
+  wall: { label: 'Wall', cost: { wood: 3 }, color: 0x5a4a3a, solid: true },
+  bed: { label: 'Bed', cost: { wood: 4, scrap: 1 }, color: 0x4a5a6a, solid: false }
+};
+
 const inventory = { wood: 0, food: 0, scrap: 0 };
 
 function updateHud() {
@@ -50,6 +56,15 @@ function updateHud() {
   }
 }
 
+function canAfford(cost) {
+  return Object.entries(cost).every(([key, amt]) => inventory[key] >= amt);
+}
+
+function spend(cost) {
+  Object.entries(cost).forEach(([key, amt]) => { inventory[key] -= amt; });
+  updateHud();
+}
+
 class MainScene extends Phaser.Scene {
   constructor() {
     super('MainScene');
@@ -57,10 +72,15 @@ class MainScene extends Phaser.Scene {
     this.interactKey = null;
     this.promptText = null;
     this.nearbyNode = null;
+
+    this.buildMode = false;
+    this.selectedBuild = 'wall';
+    this.buildGhost = null;
+    this.placedStructures = null;
+    this.occupiedTiles = new Set();
   }
 
   preload() {
-    // Simple colored-square "sprites" as placeholders until real art is swapped in.
     this.createTileTexture('grass', 0x2e3a24);
     this.createTileTexture('wall', 0x4a4038);
     this.createTileTexture('road', 0x3a3a3a);
@@ -70,6 +90,10 @@ class MainScene extends Phaser.Scene {
     Object.entries(RESOURCE_CONFIG).forEach(([type, cfg]) => {
       this.createNodeTexture(type, cfg.color);
       this.createNodeTexture(type + '_depleted', 0x1e241a);
+    });
+
+    Object.entries(BUILDABLES).forEach(([key, cfg]) => {
+      this.createNodeTexture('build_' + key, cfg.color);
     });
   }
 
@@ -105,6 +129,7 @@ class MainScene extends Phaser.Scene {
 
   create() {
     this.walls = this.physics.add.staticGroup();
+    this.placedStructures = this.physics.add.staticGroup();
 
     for (let row = 0; row < MAP_H; row++) {
       for (let col = 0; col < MAP_W; col++) {
@@ -120,24 +145,24 @@ class MainScene extends Phaser.Scene {
 
         if (code === '1') {
           this.walls.create(x, y, key).setVisible(false).refreshBody();
+          this.occupiedTiles.add(`${col},${row}`);
         }
       }
     }
 
-    // Place resource nodes
     resourceNodeData.forEach(data => {
       const x = data.col * TILE + TILE / 2;
       const y = data.row * TILE + TILE / 2;
       const sprite = this.add.image(x, y, data.type);
-      const node = {
+      this.resourceNodes.push({
         type: data.type,
         sprite,
         x,
         y,
         depleted: false,
         respawnTimer: null
-      };
-      this.resourceNodes.push(node);
+      });
+      this.occupiedTiles.add(`${data.col},${data.row}`);
     });
 
     this.player = this.physics.add.sprite(3 * TILE, 3 * TILE, 'player');
@@ -145,16 +170,19 @@ class MainScene extends Phaser.Scene {
     this.player.body.setSize(TILE - 8, TILE - 8);
 
     this.physics.add.collider(this.player, this.walls);
+    this.physics.add.collider(this.player, this.placedStructures);
 
     this.cursors = this.input.keyboard.createCursorKeys();
     this.wasd = this.input.keyboard.addKeys('W,A,S,D');
     this.interactKey = this.input.keyboard.addKey('E');
+    this.buildKey = this.input.keyboard.addKey('B');
+    this.key1 = this.input.keyboard.addKey('ONE');
+    this.key2 = this.input.keyboard.addKey('TWO');
 
     this.cameras.main.setBounds(0, 0, MAP_W * TILE, MAP_H * TILE);
     this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
     this.physics.world.setBounds(0, 0, MAP_W * TILE, MAP_H * TILE);
 
-    // Floating "press E" prompt, hidden by default
     this.promptText = this.add.text(0, 0, 'Press E to gather', {
       fontFamily: 'Courier New',
       fontSize: '12px',
@@ -165,7 +193,37 @@ class MainScene extends Phaser.Scene {
     this.promptText.setVisible(false);
     this.promptText.setDepth(10);
 
+    this.buildGhost = this.add.image(0, 0, 'build_wall');
+    this.buildGhost.setAlpha(0.5);
+    this.buildGhost.setVisible(false);
+    this.buildGhost.setDepth(9);
+
+    this.input.on('pointerdown', (pointer) => this.handlePointerDown(pointer));
+
     updateHud();
+    this.syncBuildMenu();
+  }
+
+  syncBuildMenu() {
+    const menu = document.getElementById('build-menu');
+    if (menu) {
+      menu.style.display = this.buildMode ? 'flex' : 'none';
+    }
+    document.querySelectorAll('.build-option').forEach(el => {
+      el.classList.toggle('selected', el.dataset.build === this.selectedBuild);
+    });
+  }
+
+  setSelectedBuild(key) {
+    this.selectedBuild = key;
+    this.buildGhost.setTexture('build_' + key);
+    this.syncBuildMenu();
+  }
+
+  toggleBuildMode(force) {
+    this.buildMode = (force !== undefined) ? force : !this.buildMode;
+    this.buildGhost.setVisible(this.buildMode);
+    this.syncBuildMenu();
   }
 
   getNearbyNode() {
@@ -204,11 +262,11 @@ class MainScene extends Phaser.Scene {
     this.showFloatText(node.x, node.y, `+${amount} ${cfg.key}`);
   }
 
-  showFloatText(x, y, message) {
+  showFloatText(x, y, message, color) {
     const txt = this.add.text(x, y - TILE / 2, message, {
       fontFamily: 'Courier New',
       fontSize: '13px',
-      color: '#b5c99a'
+      color: color || '#b5c99a'
     });
     txt.setDepth(11);
     this.tweens.add({
@@ -220,35 +278,106 @@ class MainScene extends Phaser.Scene {
     });
   }
 
+  handlePointerDown(pointer) {
+    if (!this.buildMode) return;
+
+    const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    const col = Math.floor(worldPoint.x / TILE);
+    const row = Math.floor(worldPoint.y / TILE);
+
+    if (col < 0 || col >= MAP_W || row < 0 || row >= MAP_H) return;
+
+    const tileKey = `${col},${row}`;
+    if (this.occupiedTiles.has(tileKey)) {
+      this.showFloatText(col * TILE + TILE / 2, row * TILE + TILE / 2, 'tile occupied', '#c96a5a');
+      return;
+    }
+
+    const px = col * TILE + TILE / 2;
+    const py = row * TILE + TILE / 2;
+    const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, px, py);
+    if (dist > TILE * 5) {
+      this.showFloatText(px, py, 'too far', '#c96a5a');
+      return;
+    }
+
+    const cfg = BUILDABLES[this.selectedBuild];
+    if (!canAfford(cfg.cost)) {
+      this.showFloatText(px, py, 'not enough resources', '#c96a5a');
+      return;
+    }
+
+    spend(cfg.cost);
+    this.placeStructure(this.selectedBuild, col, row);
+  }
+
+  placeStructure(key, col, row) {
+    const cfg = BUILDABLES[key];
+    const x = col * TILE + TILE / 2;
+    const y = row * TILE + TILE / 2;
+
+    const sprite = this.add.image(x, y, 'build_' + key);
+
+    if (cfg.solid) {
+      const body = this.placedStructures.create(x, y, 'build_' + key);
+      body.setVisible(false);
+      body.refreshBody();
+    }
+
+    this.occupiedTiles.add(`${col},${row}`);
+    this.showFloatText(x, y, `${cfg.label} built`, '#b5c99a');
+  }
+
   update() {
     const speed = 140;
     this.player.setVelocity(0);
 
-    const left = this.cursors.left.isDown || this.wasd.A.isDown;
-    const right = this.cursors.right.isDown || this.wasd.D.isDown;
-    const up = this.cursors.up.isDown || this.wasd.W.isDown;
-    const down = this.cursors.down.isDown || this.wasd.S.isDown;
-
-    let vx = 0, vy = 0;
-    if (left) vx -= 1;
-    if (right) vx += 1;
-    if (up) vy -= 1;
-    if (down) vy += 1;
-
-    if (vx !== 0 || vy !== 0) {
-      const len = Math.sqrt(vx * vx + vy * vy);
-      this.player.setVelocity((vx / len) * speed, (vy / len) * speed);
+    if (Phaser.Input.Keyboard.JustDown(this.buildKey)) {
+      this.toggleBuildMode();
     }
 
-    // Check for nearby gatherable node
-    this.nearbyNode = this.getNearbyNode();
+    if (this.buildMode) {
+      if (Phaser.Input.Keyboard.JustDown(this.key1)) this.setSelectedBuild('wall');
+      if (Phaser.Input.Keyboard.JustDown(this.key2)) this.setSelectedBuild('bed');
 
-    if (this.nearbyNode) {
-      this.promptText.setVisible(true);
-      this.promptText.setPosition(this.nearbyNode.x - 40, this.nearbyNode.y - TILE - 6);
+      const pointer = this.input.activePointer;
+      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+      const col = Math.floor(worldPoint.x / TILE);
+      const row = Math.floor(worldPoint.y / TILE);
+      this.buildGhost.setPosition(col * TILE + TILE / 2, row * TILE + TILE / 2);
+      this.buildGhost.setVisible(true);
+    } else {
+      this.buildGhost.setVisible(false);
+    }
 
-      if (Phaser.Input.Keyboard.JustDown(this.interactKey)) {
-        this.gatherNode(this.nearbyNode);
+    if (!this.buildMode) {
+      const left = this.cursors.left.isDown || this.wasd.A.isDown;
+      const right = this.cursors.right.isDown || this.wasd.D.isDown;
+      const up = this.cursors.up.isDown || this.wasd.W.isDown;
+      const down = this.cursors.down.isDown || this.wasd.S.isDown;
+
+      let vx = 0, vy = 0;
+      if (left) vx -= 1;
+      if (right) vx += 1;
+      if (up) vy -= 1;
+      if (down) vy += 1;
+
+      if (vx !== 0 || vy !== 0) {
+        const len = Math.sqrt(vx * vx + vy * vy);
+        this.player.setVelocity((vx / len) * speed, (vy / len) * speed);
+      }
+
+      this.nearbyNode = this.getNearbyNode();
+
+      if (this.nearbyNode) {
+        this.promptText.setVisible(true);
+        this.promptText.setPosition(this.nearbyNode.x - 40, this.nearbyNode.y - TILE - 6);
+
+        if (Phaser.Input.Keyboard.JustDown(this.interactKey)) {
+          this.gatherNode(this.nearbyNode);
+        }
+      } else {
+        this.promptText.setVisible(false);
       }
     } else {
       this.promptText.setVisible(false);
@@ -272,4 +401,13 @@ const config = {
   scene: MainScene
 };
 
-new Phaser.Game(config);
+const game = new Phaser.Game(config);
+
+window.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.build-option').forEach(el => {
+    el.addEventListener('click', () => {
+      const scene = game.scene.getScene('MainScene');
+      if (scene) scene.setSelectedBuild(el.dataset.build);
+    });
+  });
+});

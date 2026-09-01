@@ -53,3 +53,51 @@ html, body {
   font-size: 12px;
   color: #6b7a5e;
 }
+
+#build-menu {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px 16px;
+  border: 2px solid #3a4a33;
+  background: #14170f;
+}
+
+.build-option {
+  cursor: pointer;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: #c9d1c4;
+  border: 1px solid transparent;
+  min-width: 200px;
+  text-align: left;
+}
+
+.build-option:hover {
+  background: #1e2417;
+}
+
+.build-option.selected {
+  border-color: #b5c99a;
+  color: #b5c99a;
+}
+
+.build-option .key {
+  display: inline-block;
+  width: 18px;
+  color: #6b7a5e;
+}
+
+.build-option .cost {
+  float: right;
+  color: #6b7a5e;
+  font-size: 11px;
+}
+
+.build-hint {
+  font-size: 11px;
+  color: #6b7a5e;
+  margin-top: 4px;
+}

@@ -15,7 +15,17 @@
 <div id="game-container"></div>
 <div id="hud">
   <div id="resource-hud">Wood: 0   Food: 0   Scrap: 0</div>
-  <div id="hint-line">Walk up to a tree, bush, or car and press E to gather.</div>
+  <div id="hint-line">Walk up to a tree, bush, or car and press E to gather. Press B to build.</div>
+</div>
+
+<div id="build-menu">
+  <div class="build-option selected" data-build="wall">
+    <span class="key">1</span> Wall <span class="cost">3 wood</span>
+  </div>
+  <div class="build-option" data-build="bed">
+    <span class="key">2</span> Bed <span class="cost">4 wood, 1 scrap</span>
+  </div>
+  <div class="build-hint">Click a tile near you to place it. Press B to exit build mode.</div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.70.0/phaser.min.js"></script>
