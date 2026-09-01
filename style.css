@@ -54,6 +54,32 @@ html, body {
   color: #6b7a5e;
 }
 
+#health-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#health-bar {
+  width: 200px;
+  height: 14px;
+  background: #1e241a;
+  border: 2px solid #3a4a33;
+}
+
+#health-fill {
+  height: 100%;
+  width: 100%;
+  background: #a4553f;
+  transition: width 0.2s ease;
+}
+
+#health-label {
+  font-size: 12px;
+  color: #8a9a7a;
+}
+
 #build-menu {
   display: none;
   flex-direction: column;

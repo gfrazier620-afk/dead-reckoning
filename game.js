@@ -47,6 +47,16 @@ const BUILDABLES = {
   bed: { label: 'Bed', cost: { wood: 4, scrap: 1 }, color: 0x4a5a6a, solid: false }
 };
 
+// Day/night + zombie tuning
+const DAY_LENGTH_MS = 45000;   // how long daylight lasts
+const NIGHT_LENGTH_MS = 30000; // how long night lasts
+const ZOMBIE_SPEED = 55;
+const ZOMBIE_MAX_HEALTH = 2;   // hits to kill
+const PLAYER_MAX_HEALTH = 100;
+const ZOMBIE_DAMAGE = 8;       // damage per second while touching player
+const ATTACK_RANGE = TILE * 0.9;
+const ATTACK_COOLDOWN_MS = 400;
+
 const inventory = { wood: 0, food: 0, scrap: 0 };
 
 function updateHud() {
@@ -65,6 +75,18 @@ function spend(cost) {
   updateHud();
 }
 
+function updateStatusLine(text) {
+  const el = document.getElementById('status-line');
+  if (el) el.textContent = text;
+}
+
+function updateHealthBar(current, max) {
+  const fill = document.getElementById('health-fill');
+  const label = document.getElementById('health-label');
+  if (fill) fill.style.width = `${Math.max(0, (current / max) * 100)}%`;
+  if (label) label.textContent = `${Math.max(0, Math.ceil(current))} / ${max}`;
+}
+
 class MainScene extends Phaser.Scene {
   constructor() {
     super('MainScene');
@@ -78,6 +100,21 @@ class MainScene extends Phaser.Scene {
     this.buildGhost = null;
     this.placedStructures = null;
     this.occupiedTiles = new Set();
+
+    // Day/night state
+    this.isNight = false;
+    this.dayNumber = 1;
+    this.phaseTimer = 0;
+    this.nightOverlay = null;
+
+    // Zombies
+    this.zombies = null;
+    this.attackKey = null;
+    this.lastAttackTime = 0;
+    this.lastDamageTime = 0;
+
+    this.playerHealth = PLAYER_MAX_HEALTH;
+    this.gameOver = false;
   }
 
   preload() {
@@ -86,6 +123,7 @@ class MainScene extends Phaser.Scene {
     this.createTileTexture('road', 0x3a3a3a);
     this.createTileTexture('shelter', 0x6a8a4a);
     this.createPlayerTexture();
+    this.createZombieTexture();
 
     Object.entries(RESOURCE_CONFIG).forEach(([type, cfg]) => {
       this.createNodeTexture(type, cfg.color);
@@ -117,6 +155,20 @@ class MainScene extends Phaser.Scene {
     g.destroy();
   }
 
+  createZombieTexture() {
+    const g = this.make.graphics({ x: 0, y: 0, add: false });
+    g.fillStyle(0x5a7a4a, 1);
+    g.fillCircle(TILE / 2, TILE / 2, TILE / 2 - 5);
+    g.lineStyle(2, 0x2a3a20, 1);
+    g.strokeCircle(TILE / 2, TILE / 2, TILE / 2 - 5);
+    // simple eyes for character
+    g.fillStyle(0x0d0f0c, 1);
+    g.fillCircle(TILE / 2 - 5, TILE / 2 - 3, 2);
+    g.fillCircle(TILE / 2 + 5, TILE / 2 - 3, 2);
+    g.generateTexture('zombie', TILE, TILE);
+    g.destroy();
+  }
+
   createNodeTexture(key, color) {
     const g = this.make.graphics({ x: 0, y: 0, add: false });
     g.fillStyle(color, 1);
@@ -130,6 +182,7 @@ class MainScene extends Phaser.Scene {
   create() {
     this.walls = this.physics.add.staticGroup();
     this.placedStructures = this.physics.add.staticGroup();
+    this.zombies = this.physics.add.group();
 
     for (let row = 0; row < MAP_H; row++) {
       for (let col = 0; col < MAP_W; col++) {
@@ -171,11 +224,19 @@ class MainScene extends Phaser.Scene {
 
     this.physics.add.collider(this.player, this.walls);
     this.physics.add.collider(this.player, this.placedStructures);
+    this.physics.add.collider(this.zombies, this.walls);
+    this.physics.add.collider(this.zombies, this.placedStructures);
+    this.physics.add.collider(this.zombies, this.zombies);
+
+    this.physics.add.overlap(this.player, this.zombies, (player, zombie) => {
+      this.handlePlayerZombieContact(zombie);
+    });
 
     this.cursors = this.input.keyboard.createCursorKeys();
     this.wasd = this.input.keyboard.addKeys('W,A,S,D');
     this.interactKey = this.input.keyboard.addKey('E');
     this.buildKey = this.input.keyboard.addKey('B');
+    this.attackKey = this.input.keyboard.addKey('SPACE');
     this.key1 = this.input.keyboard.addKey('ONE');
     this.key2 = this.input.keyboard.addKey('TWO');
 
@@ -198,10 +259,19 @@ class MainScene extends Phaser.Scene {
     this.buildGhost.setVisible(false);
     this.buildGhost.setDepth(9);
 
+    // Night overlay - a rectangle that covers the whole map, fixed to camera
+    this.nightOverlay = this.add.rectangle(0, 0, MAP_W * TILE * 2, MAP_H * TILE * 2, 0x0a0e14, 0);
+    this.nightOverlay.setOrigin(0.5, 0.5);
+    this.nightOverlay.setDepth(20);
+    this.nightOverlay.setScrollFactor(0);
+    this.nightOverlay.setPosition((MAP_W * TILE) / 2, (MAP_H * TILE) / 2);
+
     this.input.on('pointerdown', (pointer) => this.handlePointerDown(pointer));
 
     updateHud();
+    updateHealthBar(this.playerHealth, PLAYER_MAX_HEALTH);
     this.syncBuildMenu();
+    this.startDay();
   }
 
   syncBuildMenu() {
@@ -225,6 +295,112 @@ class MainScene extends Phaser.Scene {
     this.buildGhost.setVisible(this.buildMode);
     this.syncBuildMenu();
   }
+
+  // ---------- Day / Night ----------
+
+  startDay() {
+    this.isNight = false;
+    this.phaseTimer = DAY_LENGTH_MS;
+    updateStatusLine(`day ${this.dayNumber} — gather and build before nightfall`);
+    this.tweens.add({
+      targets: this.nightOverlay,
+      alpha: 0,
+      duration: 2000
+    });
+
+    // Clear any remaining zombies when day starts
+    this.zombies.getChildren().slice().forEach(z => z.destroy());
+  }
+
+  startNight() {
+    this.isNight = true;
+    this.phaseTimer = NIGHT_LENGTH_MS;
+    updateStatusLine(`night ${this.dayNumber} — zombies are coming, defend yourself`);
+    this.tweens.add({
+      targets: this.nightOverlay,
+      alpha: 0.55,
+      duration: 3000
+    });
+    this.spawnZombieWave();
+  }
+
+  spawnZombieWave() {
+    const count = 3 + this.dayNumber; // gets harder each night
+    for (let i = 0; i < count; i++) {
+      this.time.delayedCall(i * 900, () => this.spawnZombie());
+    }
+  }
+
+  spawnZombie() {
+    if (this.gameOver) return;
+
+    // Spawn at a random edge of the map
+    const edge = Phaser.Math.Between(0, 3);
+    let x, y;
+    if (edge === 0) { x = 0; y = Phaser.Math.Between(0, MAP_H * TILE); }
+    else if (edge === 1) { x = MAP_W * TILE; y = Phaser.Math.Between(0, MAP_H * TILE); }
+    else if (edge === 2) { x = Phaser.Math.Between(0, MAP_W * TILE); y = 0; }
+    else { x = Phaser.Math.Between(0, MAP_W * TILE); y = MAP_H * TILE; }
+
+    const zombie = this.zombies.create(x, y, 'zombie');
+    zombie.setCollideWorldBounds(true);
+    zombie.body.setSize(TILE - 10, TILE - 10);
+    zombie.health = ZOMBIE_MAX_HEALTH;
+  }
+
+  // ---------- Combat ----------
+
+  handlePlayerZombieContact(zombie) {
+    if (this.gameOver) return;
+    const now = this.time.now;
+    if (now - this.lastDamageTime > 500) {
+      this.lastDamageTime = now;
+      this.playerHealth -= ZOMBIE_DAMAGE;
+      updateHealthBar(this.playerHealth, PLAYER_MAX_HEALTH);
+      this.cameras.main.shake(120, 0.004);
+      if (this.playerHealth <= 0) {
+        this.handleGameOver();
+      }
+    }
+  }
+
+  attackNearestZombie() {
+    let closest = null;
+    let closestDist = Infinity;
+    this.zombies.getChildren().forEach(z => {
+      const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, z.x, z.y);
+      if (dist < ATTACK_RANGE && dist < closestDist) {
+        closest = z;
+        closestDist = dist;
+      }
+    });
+
+    if (closest) {
+      closest.health -= 1;
+      this.showFloatText(closest.x, closest.y, 'hit!', '#e8c05a');
+      if (closest.health <= 0) {
+        this.showFloatText(closest.x, closest.y, 'zombie down', '#c96a5a');
+        closest.destroy();
+      } else {
+        closest.setTint(0xff8888);
+        this.time.delayedCall(150, () => { if (closest.active) closest.clearTint(); });
+      }
+    }
+  }
+
+  handleGameOver() {
+    this.gameOver = true;
+    this.zombies.getChildren().forEach(z => z.setVelocity(0));
+    this.player.setVelocity(0);
+    updateStatusLine(`you died on night ${this.dayNumber} — refresh to try again`);
+    this.add.text(this.player.x, this.player.y - 40, 'YOU DIED', {
+      fontFamily: 'Courier New',
+      fontSize: '20px',
+      color: '#c96a5a'
+    }).setOrigin(0.5).setDepth(30);
+  }
+
+  // ---------- Resources (unchanged from before) ----------
 
   getNearbyNode() {
     const GATHER_RANGE = TILE * 1.1;
@@ -268,7 +444,7 @@ class MainScene extends Phaser.Scene {
       fontSize: '13px',
       color: color || '#b5c99a'
     });
-    txt.setDepth(11);
+    txt.setDepth(21);
     this.tweens.add({
       targets: txt,
       y: y - TILE * 1.6,
@@ -277,6 +453,8 @@ class MainScene extends Phaser.Scene {
       onComplete: () => txt.destroy()
     });
   }
+
+  // ---------- Building (unchanged from before) ----------
 
   handlePointerDown(pointer) {
     if (!this.buildMode) return;
@@ -316,7 +494,7 @@ class MainScene extends Phaser.Scene {
     const x = col * TILE + TILE / 2;
     const y = row * TILE + TILE / 2;
 
-    const sprite = this.add.image(x, y, 'build_' + key);
+    this.add.image(x, y, 'build_' + key);
 
     if (cfg.solid) {
       const body = this.placedStructures.create(x, y, 'build_' + key);
@@ -328,7 +506,11 @@ class MainScene extends Phaser.Scene {
     this.showFloatText(x, y, `${cfg.label} built`, '#b5c99a');
   }
 
-  update() {
+  // ---------- Main loop ----------
+
+  update(time, delta) {
+    if (this.gameOver) return;
+
     const speed = 140;
     this.player.setVelocity(0);
 
@@ -379,8 +561,32 @@ class MainScene extends Phaser.Scene {
       } else {
         this.promptText.setVisible(false);
       }
+
+      if (Phaser.Input.Keyboard.JustDown(this.attackKey) && time - this.lastAttackTime > ATTACK_COOLDOWN_MS) {
+        this.lastAttackTime = time;
+        this.attackNearestZombie();
+      }
     } else {
       this.promptText.setVisible(false);
+    }
+
+    // Zombie AI: move toward player
+    this.zombies.getChildren().forEach(zombie => {
+      const dx = this.player.x - zombie.x;
+      const dy = this.player.y - zombie.y;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1;
+      zombie.setVelocity((dx / len) * ZOMBIE_SPEED, (dy / len) * ZOMBIE_SPEED);
+    });
+
+    // Day/night timer
+    this.phaseTimer -= delta;
+    if (this.phaseTimer <= 0) {
+      if (this.isNight) {
+        this.dayNumber += 1;
+        this.startDay();
+      } else {
+        this.startNight();
+      }
     }
   }
 }
