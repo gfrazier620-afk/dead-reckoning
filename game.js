@@ -47,6 +47,8 @@ const BUILDABLES = {
   bed: { label: 'Bed', cost: { wood: 4, scrap: 1 }, color: 0x4a5a6a, solid: false }
 };
 
+const DEMOLISH_REFUND_RATE = 0.5; // fraction of original cost refunded
+
 // Day/night + zombie tuning
 const DAY_LENGTH_MS = 45000;
 const NIGHT_LENGTH_MS = 30000;
@@ -59,18 +61,9 @@ const ATTACK_COOLDOWN_MS = 400;
 
 // Survivor perks: each recruited survivor applies a small passive bonus
 const PERKS = {
-  scavenger: {
-    label: 'Scavenger',
-    desc: '+1 to every resource gathered'
-  },
-  medic: {
-    label: 'Medic',
-    desc: 'slowly regenerates your health'
-  },
-  guard: {
-    label: 'Guard',
-    desc: 'reduces zombie damage to you'
-  }
+  scavenger: { label: 'Scavenger', desc: '+1 to every resource gathered' },
+  medic: { label: 'Medic', desc: 'slowly regenerates your health' },
+  guard: { label: 'Guard', desc: 'reduces zombie damage to you' }
 };
 
 // Hand-placed survivors waiting to be found on the map
@@ -81,7 +74,7 @@ const survivorData = [
 ];
 
 const inventory = { wood: 0, food: 0, scrap: 0 };
-const roster = []; // recruited survivors: { name, perk }
+const roster = [];
 
 function updateHud() {
   const el = document.getElementById('resource-hud');
@@ -96,6 +89,13 @@ function canAfford(cost) {
 
 function spend(cost) {
   Object.entries(cost).forEach(([key, amt]) => { inventory[key] -= amt; });
+  updateHud();
+}
+
+function refund(cost, rate) {
+  Object.entries(cost).forEach(([key, amt]) => {
+    inventory[key] += Math.ceil(amt * rate);
+  });
   updateHud();
 }
 
@@ -140,10 +140,13 @@ class MainScene extends Phaser.Scene {
     super('MainScene');
     this.resourceNodes = [];
     this.survivorSprites = [];
+    this.placedList = []; // { key, sprite, body, col, row }
     this.interactKey = null;
+    this.demolishKey = null;
     this.promptText = null;
     this.nearbyNode = null;
     this.nearbySurvivor = null;
+    this.nearbyStructure = null;
 
     this.buildMode = false;
     this.selectedBuild = 'wall';
@@ -224,7 +227,6 @@ class MainScene extends Phaser.Scene {
     g.fillCircle(TILE / 2, TILE / 2, TILE / 2 - 4);
     g.lineStyle(2, 0x1e3a4a, 1);
     g.strokeCircle(TILE / 2, TILE / 2, TILE / 2 - 4);
-    // small "+" marker to read as someone needing help / friendly
     g.lineStyle(2, 0xe8e8d0, 1);
     g.beginPath();
     g.moveTo(TILE / 2 - 5, TILE / 2);
@@ -285,7 +287,6 @@ class MainScene extends Phaser.Scene {
       this.occupiedTiles.add(`${data.col},${data.row}`);
     });
 
-    // Place survivors waiting to be rescued (skip any already recruited from a prior session? no persistence yet)
     survivorData.forEach(data => {
       const x = data.col * TILE + TILE / 2;
       const y = data.row * TILE + TILE / 2;
@@ -326,6 +327,7 @@ class MainScene extends Phaser.Scene {
     this.cursors = this.input.keyboard.createCursorKeys();
     this.wasd = this.input.keyboard.addKeys('W,A,S,D');
     this.interactKey = this.input.keyboard.addKey('E');
+    this.demolishKey = this.input.keyboard.addKey('R');
     this.buildKey = this.input.keyboard.addKey('B');
     this.attackKey = this.input.keyboard.addKey('SPACE');
     this.key1 = this.input.keyboard.addKey('ONE');
@@ -549,23 +551,43 @@ class MainScene extends Phaser.Scene {
     updateStatusLine(`${survivor.name} joined you — ${perkInfo.label}: ${perkInfo.desc}`);
   }
 
-  showFloatText(x, y, message, color) {
-    const txt = this.add.text(x, y - TILE / 2, message, {
-      fontFamily: 'Courier New',
-      fontSize: '13px',
-      color: color || '#b5c99a'
+  // ---------- Building & Demolishing ----------
+
+  getNearbyStructure() {
+    const RANGE = TILE * 1.1;
+    let closest = null;
+    let closestDist = Infinity;
+
+    this.placedList.forEach(s => {
+      const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, s.sprite.x, s.sprite.y);
+      if (dist < RANGE && dist < closestDist) {
+        closest = s;
+        closestDist = dist;
+      }
     });
-    txt.setDepth(21);
-    this.tweens.add({
-      targets: txt,
-      y: y - TILE * 1.6,
-      alpha: 0,
-      duration: 900,
-      onComplete: () => txt.destroy()
-    });
+
+    return closest;
   }
 
-  // ---------- Building ----------
+  demolishStructure(structure) {
+    const cfg = BUILDABLES[structure.key];
+    refund(cfg.cost, DEMOLISH_REFUND_RATE);
+
+    if (structure.body) {
+      structure.body.destroy();
+    }
+    structure.sprite.destroy();
+
+    this.occupiedTiles.delete(`${structure.col},${structure.row}`);
+    this.placedList = this.placedList.filter(s => s !== structure);
+
+    this.showFloatText(
+      structure.col * TILE + TILE / 2,
+      structure.row * TILE + TILE / 2,
+      `${cfg.label} demolished (refunded)`,
+      '#c9a25a'
+    );
+  }
 
   handlePointerDown(pointer) {
     if (!this.buildMode) return;
@@ -605,16 +627,34 @@ class MainScene extends Phaser.Scene {
     const x = col * TILE + TILE / 2;
     const y = row * TILE + TILE / 2;
 
-    this.add.image(x, y, 'build_' + key);
+    const sprite = this.add.image(x, y, 'build_' + key);
+    let body = null;
 
     if (cfg.solid) {
-      const body = this.placedStructures.create(x, y, 'build_' + key);
+      body = this.placedStructures.create(x, y, 'build_' + key);
       body.setVisible(false);
       body.refreshBody();
     }
 
     this.occupiedTiles.add(`${col},${row}`);
+    this.placedList.push({ key, sprite, body, col, row });
     this.showFloatText(x, y, `${cfg.label} built`, '#b5c99a');
+  }
+
+  showFloatText(x, y, message, color) {
+    const txt = this.add.text(x, y - TILE / 2, message, {
+      fontFamily: 'Courier New',
+      fontSize: '13px',
+      color: color || '#b5c99a'
+    });
+    txt.setDepth(21);
+    this.tweens.add({
+      targets: txt,
+      y: y - TILE * 1.6,
+      alpha: 0,
+      duration: 900,
+      onComplete: () => txt.destroy()
+    });
   }
 
   // ---------- Main loop ----------
@@ -660,9 +700,10 @@ class MainScene extends Phaser.Scene {
         this.player.setVelocity((vx / len) * speed, (vy / len) * speed);
       }
 
-      // Prompt priority: survivor rescue takes precedence over resource gathering
+      // Prompt priority: survivor rescue > demolish own structure > gather resource
       this.nearbySurvivor = this.getNearbySurvivor();
-      this.nearbyNode = this.nearbySurvivor ? null : this.getNearbyNode();
+      this.nearbyStructure = this.nearbySurvivor ? null : this.getNearbyStructure();
+      this.nearbyNode = (this.nearbySurvivor || this.nearbyStructure) ? null : this.getNearbyNode();
 
       if (this.nearbySurvivor) {
         this.promptText.setText(`Press E to rescue ${this.nearbySurvivor.name}`);
@@ -671,6 +712,16 @@ class MainScene extends Phaser.Scene {
 
         if (Phaser.Input.Keyboard.JustDown(this.interactKey)) {
           this.rescueSurvivor(this.nearbySurvivor);
+        }
+      } else if (this.nearbyStructure) {
+        const cfg = BUILDABLES[this.nearbyStructure.key];
+        const refundAmt = Object.entries(cfg.cost).map(([k, v]) => `${Math.ceil(v * DEMOLISH_REFUND_RATE)} ${k}`).join(', ');
+        this.promptText.setText(`Press R to demolish ${cfg.label} (+${refundAmt})`);
+        this.promptText.setVisible(true);
+        this.promptText.setPosition(this.nearbyStructure.sprite.x - 70, this.nearbyStructure.sprite.y - TILE - 6);
+
+        if (Phaser.Input.Keyboard.JustDown(this.demolishKey)) {
+          this.demolishStructure(this.nearbyStructure);
         }
       } else if (this.nearbyNode) {
         this.promptText.setText('Press E to gather');
