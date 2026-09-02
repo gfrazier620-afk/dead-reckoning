@@ -31,11 +31,142 @@ html, body {
   color: #6b7a5e;
 }
 
-#game-container {
+/* Game area + overlay screens */
+
+#game-wrapper {
+  position: relative;
+  width: 640px;
+  height: 480px;
   margin-top: 12px;
   border: 3px solid #3a4a33;
   box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
 }
+
+#game-container {
+  width: 100%;
+  height: 100%;
+}
+
+.overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(10, 12, 9, 0.94);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 20px;
+  box-sizing: border-box;
+  z-index: 5;
+}
+
+.overlay h2 {
+  margin: 0 0 10px;
+  font-size: 24px;
+  letter-spacing: 2px;
+  color: #b5c99a;
+}
+
+.overlay p {
+  font-size: 13px;
+  color: #9aab8a;
+  max-width: 420px;
+  margin: 0 0 14px;
+}
+
+.gameover-title {
+  color: #c96a5a !important;
+}
+
+.controls-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 18px;
+  font-size: 12px;
+  color: #8a9a7a;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 16px;
+}
+
+.controls-list .key {
+  color: #e8e8d0;
+  border: 1px solid #3a4a33;
+  padding: 1px 6px;
+  margin-right: 4px;
+}
+
+#start-button, #restart-button {
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+  letter-spacing: 1px;
+  color: #0d0f0c;
+  background: #b5c99a;
+  border: none;
+  padding: 10px 22px;
+  cursor: pointer;
+}
+
+#start-button:hover, #restart-button:hover {
+  background: #c9d9ae;
+}
+
+/* Health / hunger bars */
+
+#bars {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 300px;
+}
+
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bar-label {
+  font-size: 11px;
+  color: #8a9a7a;
+  width: 32px;
+}
+
+.bar {
+  flex: 1;
+  height: 12px;
+  background: #1e241a;
+  border: 2px solid #3a4a33;
+}
+
+.bar-fill {
+  height: 100%;
+  width: 100%;
+  transition: width 0.2s ease;
+}
+
+.bar-fill.health {
+  background: #a4553f;
+}
+
+.bar-fill.hunger {
+  background: #a4863f;
+}
+
+.bar-value {
+  font-size: 11px;
+  color: #8a9a7a;
+  width: 60px;
+  text-align: right;
+}
+
+/* Resource HUD */
 
 #hud {
   margin-top: 8px;
@@ -50,35 +181,12 @@ html, body {
 }
 
 #hint-line {
-  font-size: 12px;
+  font-size: 11px;
   color: #6b7a5e;
+  max-width: 460px;
 }
 
-#health-bar-wrap {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-#health-bar {
-  width: 200px;
-  height: 14px;
-  background: #1e241a;
-  border: 2px solid #3a4a33;
-}
-
-#health-fill {
-  height: 100%;
-  width: 100%;
-  background: #a4553f;
-  transition: width 0.2s ease;
-}
-
-#health-label {
-  font-size: 12px;
-  color: #8a9a7a;
-}
+/* Build menu */
 
 #build-menu {
   display: none;
@@ -128,8 +236,11 @@ html, body {
   margin-top: 4px;
 }
 
+/* Roster panel */
+
 #roster-panel {
   margin-top: 12px;
+  margin-bottom: 20px;
   padding: 10px 16px;
   border: 2px solid #2a3a4a;
   background: #10151a;

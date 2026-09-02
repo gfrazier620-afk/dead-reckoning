@@ -12,16 +12,45 @@
   <p id="status-line">day 1 — arrow keys / WASD to move</p>
 </div>
 
-<div id="game-container"></div>
+<div id="game-wrapper">
+  <div id="game-container"></div>
 
-<div id="health-bar-wrap">
-  <div id="health-bar"><div id="health-fill"></div></div>
-  <span id="health-label">100 / 100</span>
+  <div id="start-screen" class="overlay">
+    <h2>DEAD RECKONING</h2>
+    <p id="start-detail">Build a shelter. Gather what you can. Rescue who you can. Survive the nights.</p>
+    <ul class="controls-list">
+      <li><span class="key">WASD</span> move</li>
+      <li><span class="key">E</span> gather / rescue</li>
+      <li><span class="key">B</span> build menu</li>
+      <li><span class="key">R</span> demolish</li>
+      <li><span class="key">Space</span> attack</li>
+    </ul>
+    <button id="start-button">Start Survival</button>
+  </div>
+
+  <div id="gameover-screen" class="overlay" style="display:none;">
+    <h2 class="gameover-title">YOU DIED</h2>
+    <p id="gameover-detail"></p>
+    <button id="restart-button">Try Again</button>
+  </div>
+</div>
+
+<div id="bars">
+  <div class="bar-row">
+    <span class="bar-label">HP</span>
+    <div id="health-bar" class="bar"><div id="health-fill" class="bar-fill health"></div></div>
+    <span id="health-label" class="bar-value">100 / 100</span>
+  </div>
+  <div class="bar-row">
+    <span class="bar-label">Food</span>
+    <div id="hunger-bar" class="bar"><div id="hunger-fill" class="bar-fill hunger"></div></div>
+    <span id="hunger-label" class="bar-value">100 / 100</span>
+  </div>
 </div>
 
 <div id="hud">
   <div id="resource-hud">Wood: 0   Food: 0   Scrap: 0</div>
-  <div id="hint-line">Gather with E. Build with B. Demolish your own structures with R. Attack zombies with Space.</div>
+  <div id="hint-line">Gather with E. Build with B. Demolish your own structures with R. Attack zombies with Space. Hunger drains over time and auto-eats your food.</div>
 </div>
 
 <div id="build-menu">

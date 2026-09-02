@@ -36,45 +36,98 @@ const resourceNodeData = [
 ];
 
 const RESOURCE_CONFIG = {
-  tree: { key: 'wood', color: 0x3d5a2c, min: 1, max: 3, respawnMs: 12000 },
-  bush: { key: 'food', color: 0x8a4a5a, min: 1, max: 2, respawnMs: 9000 },
-  car: { key: 'scrap', color: 0x6a6a72, min: 2, max: 4, respawnMs: 18000 }
+  tree: { key: 'wood', min: 1, max: 3, respawnMs: 12000 },
+  bush: { key: 'food', min: 1, max: 2, respawnMs: 9000 },
+  car: { key: 'scrap', min: 2, max: 4, respawnMs: 18000 }
 };
 
 // Buildable structures and their costs
 const BUILDABLES = {
-  wall: { label: 'Wall', cost: { wood: 3 }, color: 0x5a4a3a, solid: true },
-  bed: { label: 'Bed', cost: { wood: 4, scrap: 1 }, color: 0x4a5a6a, solid: false }
+  wall: { label: 'Wall', cost: { wood: 3 }, solid: true },
+  bed: { label: 'Bed', cost: { wood: 4, scrap: 1 }, solid: false }
 };
 
-const DEMOLISH_REFUND_RATE = 0.5; // fraction of original cost refunded
+const DEMOLISH_REFUND_RATE = 0.5;
 
 // Day/night + zombie tuning
 const DAY_LENGTH_MS = 45000;
 const NIGHT_LENGTH_MS = 30000;
-const ZOMBIE_SPEED = 55;
-const ZOMBIE_MAX_HEALTH = 2;
+const ZOMBIE_BASE_SPEED = 55;
+const ZOMBIE_SPEED_PER_DAY = 3;
+const ZOMBIE_BASE_HEALTH = 2;
 const PLAYER_MAX_HEALTH = 100;
 const ZOMBIE_DAMAGE = 8;
 const ATTACK_RANGE = TILE * 0.9;
 const ATTACK_COOLDOWN_MS = 400;
 
-// Survivor perks: each recruited survivor applies a small passive bonus
+// Hunger tuning
+const HUNGER_MAX = 100;
+const HUNGER_DECAY_INTERVAL_MS = 6000;
+const HUNGER_AUTO_EAT_THRESHOLD = 50;
+const HUNGER_AUTO_EAT_GAIN = 15;
+const STARVE_DAMAGE = 2;
+const STARVE_INTERVAL_MS = 3000;
+
+// Survivor perks
 const PERKS = {
   scavenger: { label: 'Scavenger', desc: '+1 to every resource gathered' },
   medic: { label: 'Medic', desc: 'slowly regenerates your health' },
   guard: { label: 'Guard', desc: 'reduces zombie damage to you' }
 };
 
-// Hand-placed survivors waiting to be found on the map
 const survivorData = [
   { name: 'Mara', perk: 'scavenger', col: 18, row: 12 },
   { name: 'Doc Ellis', perk: 'medic', col: 1, row: 12 },
   { name: 'Reyes', perk: 'guard', col: 9, row: 1 }
 ];
 
+// ---------- Save / load ----------
+
+const SAVE_KEY = 'dead-reckoning-save-v1';
+
+function saveGame(dayNumber, hungerValue) {
+  try {
+    const data = {
+      inventory: { ...inventory },
+      roster: roster.map(s => ({ name: s.name, perk: s.perk })),
+      dayNumber,
+      hunger: hungerValue
+    };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  } catch (e) {
+    // Storage may be unavailable in a sandboxed preview - that's fine, just skip.
+  }
+}
+
+function loadGame() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function clearSave() {
+  try {
+    localStorage.removeItem(SAVE_KEY);
+  } catch (e) {
+    // ignore
+  }
+}
+
 const inventory = { wood: 0, food: 0, scrap: 0 };
 const roster = [];
+
+const savedGame = loadGame();
+if (savedGame) {
+  if (savedGame.inventory) Object.assign(inventory, savedGame.inventory);
+  if (Array.isArray(savedGame.roster)) savedGame.roster.forEach(s => roster.push(s));
+}
+const startingDay = savedGame && savedGame.dayNumber ? savedGame.dayNumber : 1;
+let hunger = savedGame && typeof savedGame.hunger === 'number' ? savedGame.hunger : HUNGER_MAX;
+
+// ---------- HUD helpers ----------
 
 function updateHud() {
   const el = document.getElementById('resource-hud');
@@ -111,6 +164,13 @@ function updateHealthBar(current, max) {
   if (label) label.textContent = `${Math.max(0, Math.ceil(current))} / ${max}`;
 }
 
+function updateHungerBar(current, max) {
+  const fill = document.getElementById('hunger-fill');
+  const label = document.getElementById('hunger-label');
+  if (fill) fill.style.width = `${Math.max(0, (current / max) * 100)}%`;
+  if (label) label.textContent = `${Math.max(0, Math.ceil(current))} / ${max}`;
+}
+
 function hasPerk(perkKey) {
   return roster.some(s => s.perk === perkKey);
 }
@@ -140,7 +200,7 @@ class MainScene extends Phaser.Scene {
     super('MainScene');
     this.resourceNodes = [];
     this.survivorSprites = [];
-    this.placedList = []; // { key, sprite, body, col, row }
+    this.placedList = [];
     this.interactKey = null;
     this.demolishKey = null;
     this.promptText = null;
@@ -155,7 +215,7 @@ class MainScene extends Phaser.Scene {
     this.occupiedTiles = new Set();
 
     this.isNight = false;
-    this.dayNumber = 1;
+    this.dayNumber = startingDay;
     this.phaseTimer = 0;
     this.nightOverlay = null;
 
@@ -164,35 +224,60 @@ class MainScene extends Phaser.Scene {
     this.lastAttackTime = 0;
     this.lastDamageTime = 0;
     this.lastRegenTime = 0;
+    this.lastHungerDecay = 0;
+    this.lastStarveDamage = 0;
 
     this.playerHealth = PLAYER_MAX_HEALTH;
     this.gameOver = false;
   }
 
   preload() {
-    this.createTileTexture('grass', 0x2e3a24);
-    this.createTileTexture('wall', 0x4a4038);
-    this.createTileTexture('road', 0x3a3a3a);
-    this.createTileTexture('shelter', 0x6a8a4a);
+    this.createGroundTexture('grass', 0x2e3a24, 'grass');
+    this.createGroundTexture('wall', 0x4a4038, 'brick');
+    this.createGroundTexture('road', 0x3a3a3a, 'road');
+    this.createGroundTexture('shelter', 0x6a8a4a, 'grass');
     this.createPlayerTexture();
     this.createZombieTexture();
     this.createSurvivorTexture();
-
-    Object.entries(RESOURCE_CONFIG).forEach(([type, cfg]) => {
-      this.createNodeTexture(type, cfg.color);
-      this.createNodeTexture(type + '_depleted', 0x1e241a);
-    });
-
-    Object.entries(BUILDABLES).forEach(([key, cfg]) => {
-      this.createNodeTexture('build_' + key, cfg.color);
-    });
+    this.createTreeTexture();
+    this.createBushTexture();
+    this.createCarTexture();
+    this.createDepletedTexture('tree_depleted');
+    this.createDepletedTexture('bush_depleted');
+    this.createDepletedTexture('car_depleted');
+    this.createBuildTexture('build_wall', 0x5a4a3a);
+    this.createBuildTexture('build_bed', 0x4a5a6a, true);
   }
 
-  createTileTexture(key, color) {
+  createGroundTexture(key, color, pattern) {
     const g = this.make.graphics({ x: 0, y: 0, add: false });
     g.fillStyle(color, 1);
     g.fillRect(0, 0, TILE, TILE);
-    g.lineStyle(1, 0x000000, 0.15);
+
+    if (pattern === 'grass') {
+      g.fillStyle(Phaser.Display.Color.GetColor(
+        Math.min(255, ((color >> 16) & 0xff) + 12),
+        Math.min(255, ((color >> 8) & 0xff) + 12),
+        Math.min(255, (color & 0xff) + 12)
+      ), 0.5);
+      for (let i = 0; i < 5; i++) {
+        const x = Phaser.Math.Between(3, TILE - 3);
+        const y = Phaser.Math.Between(3, TILE - 3);
+        g.fillRect(x, y, 2, 2);
+      }
+    } else if (pattern === 'brick') {
+      g.lineStyle(1, 0x2b241d, 0.6);
+      g.strokeRect(0, 8, TILE, 0);
+      g.strokeRect(0, 20, TILE, 0);
+      g.strokeRect(8, 0, 0, 8);
+      g.strokeRect(24, 8, 0, 12);
+      g.strokeRect(16, 20, 0, 12);
+    } else if (pattern === 'road') {
+      g.fillStyle(0x2a2a2a, 0.5);
+      g.fillRect(0, TILE / 2 - 1, TILE, 2);
+    }
+
+    g.lineStyle(1, 0x000000, 0.12);
     g.strokeRect(0, 0, TILE, TILE);
     g.generateTexture(key, TILE, TILE);
     g.destroy();
@@ -200,10 +285,15 @@ class MainScene extends Phaser.Scene {
 
   createPlayerTexture() {
     const g = this.make.graphics({ x: 0, y: 0, add: false });
+    // body
     g.fillStyle(0xd97757, 1);
-    g.fillCircle(TILE / 2, TILE / 2, TILE / 2 - 4);
-    g.lineStyle(2, 0x2b1a12, 1);
-    g.strokeCircle(TILE / 2, TILE / 2, TILE / 2 - 4);
+    g.fillCircle(TILE / 2, TILE / 2 + 2, TILE / 2 - 6);
+    // head
+    g.fillStyle(0xe8a87c, 1);
+    g.fillCircle(TILE / 2, TILE / 2 - 6, 6);
+    // outline
+    g.lineStyle(2, 0x2b1a12, 0.8);
+    g.strokeCircle(TILE / 2, TILE / 2 + 2, TILE / 2 - 6);
     g.generateTexture('player', TILE, TILE);
     g.destroy();
   }
@@ -211,12 +301,17 @@ class MainScene extends Phaser.Scene {
   createZombieTexture() {
     const g = this.make.graphics({ x: 0, y: 0, add: false });
     g.fillStyle(0x5a7a4a, 1);
-    g.fillCircle(TILE / 2, TILE / 2, TILE / 2 - 5);
-    g.lineStyle(2, 0x2a3a20, 1);
-    g.strokeCircle(TILE / 2, TILE / 2, TILE / 2 - 5);
-    g.fillStyle(0x0d0f0c, 1);
-    g.fillCircle(TILE / 2 - 5, TILE / 2 - 3, 2);
-    g.fillCircle(TILE / 2 + 5, TILE / 2 - 3, 2);
+    g.fillCircle(TILE / 2, TILE / 2 + 2, TILE / 2 - 6);
+    g.fillStyle(0x4a6a3e, 1);
+    g.fillCircle(TILE / 2, TILE / 2 - 6, 6);
+    g.lineStyle(2, 0x2a3a20, 0.8);
+    g.strokeCircle(TILE / 2, TILE / 2 + 2, TILE / 2 - 6);
+    g.fillStyle(0xc94a3a, 1);
+    g.fillCircle(TILE / 2 - 4, TILE / 2 - 7, 1.6);
+    g.fillCircle(TILE / 2 + 4, TILE / 2 - 7, 1.6);
+    // torn edge detail
+    g.fillStyle(0x3a4a30, 1);
+    g.fillTriangle(TILE / 2 - 8, TILE / 2 + 8, TILE / 2 - 4, TILE / 2 + 14, TILE / 2, TILE / 2 + 8);
     g.generateTexture('zombie', TILE, TILE);
     g.destroy();
   }
@@ -224,26 +319,94 @@ class MainScene extends Phaser.Scene {
   createSurvivorTexture() {
     const g = this.make.graphics({ x: 0, y: 0, add: false });
     g.fillStyle(0x5a86a8, 1);
-    g.fillCircle(TILE / 2, TILE / 2, TILE / 2 - 4);
-    g.lineStyle(2, 0x1e3a4a, 1);
-    g.strokeCircle(TILE / 2, TILE / 2, TILE / 2 - 4);
+    g.fillCircle(TILE / 2, TILE / 2 + 2, TILE / 2 - 6);
+    g.fillStyle(0xe8b88c, 1);
+    g.fillCircle(TILE / 2, TILE / 2 - 6, 6);
+    g.lineStyle(2, 0x1e3a4a, 0.8);
+    g.strokeCircle(TILE / 2, TILE / 2 + 2, TILE / 2 - 6);
     g.lineStyle(2, 0xe8e8d0, 1);
     g.beginPath();
-    g.moveTo(TILE / 2 - 5, TILE / 2);
-    g.lineTo(TILE / 2 + 5, TILE / 2);
-    g.moveTo(TILE / 2, TILE / 2 - 5);
-    g.lineTo(TILE / 2, TILE / 2 + 5);
+    g.moveTo(TILE / 2 - 5, TILE / 2 + 10);
+    g.lineTo(TILE / 2 + 5, TILE / 2 + 10);
+    g.moveTo(TILE / 2, TILE / 2 + 5);
+    g.lineTo(TILE / 2, TILE / 2 + 15);
     g.strokePath();
     g.generateTexture('survivor', TILE, TILE);
     g.destroy();
   }
 
-  createNodeTexture(key, color) {
+  createTreeTexture() {
+    const g = this.make.graphics({ x: 0, y: 0, add: false });
+    // trunk
+    g.fillStyle(0x4a3826, 1);
+    g.fillRect(TILE / 2 - 3, TILE / 2 + 4, 6, 12);
+    // foliage - layered circles
+    g.fillStyle(0x2f4a24, 1);
+    g.fillCircle(TILE / 2, TILE / 2, 12);
+    g.fillStyle(0x3d5a2c, 1);
+    g.fillCircle(TILE / 2 - 5, TILE / 2 - 2, 8);
+    g.fillCircle(TILE / 2 + 5, TILE / 2 - 2, 8);
+    g.fillCircle(TILE / 2, TILE / 2 - 8, 8);
+    g.generateTexture('tree', TILE, TILE);
+    g.destroy();
+  }
+
+  createBushTexture() {
+    const g = this.make.graphics({ x: 0, y: 0, add: false });
+    g.fillStyle(0x5a3a42, 1);
+    g.fillCircle(TILE / 2, TILE / 2 + 4, 10);
+    g.fillStyle(0x8a4a5a, 1);
+    g.fillCircle(TILE / 2 - 5, TILE / 2, 6);
+    g.fillCircle(TILE / 2 + 5, TILE / 2, 6);
+    g.fillCircle(TILE / 2, TILE / 2 - 4, 6);
+    // berries
+    g.fillStyle(0xc96a7a, 1);
+    g.fillCircle(TILE / 2 - 3, TILE / 2, 1.6);
+    g.fillCircle(TILE / 2 + 4, TILE / 2 + 2, 1.6);
+    g.fillCircle(TILE / 2, TILE / 2 - 3, 1.6);
+    g.generateTexture('bush', TILE, TILE);
+    g.destroy();
+  }
+
+  createCarTexture() {
+    const g = this.make.graphics({ x: 0, y: 0, add: false });
+    g.fillStyle(0x54545c, 1);
+    g.fillRoundedRect(3, 10, TILE - 6, 14, 4);
+    g.fillStyle(0x3a3a40, 1);
+    g.fillRoundedRect(7, 6, TILE - 14, 10, 3);
+    g.fillStyle(0x7a8a94, 0.7);
+    g.fillRoundedRect(9, 7, TILE - 18, 5, 2);
+    g.fillStyle(0x1a1a1a, 1);
+    g.fillCircle(9, 25, 3);
+    g.fillCircle(TILE - 9, 25, 3);
+    g.generateTexture('car', TILE, TILE);
+    g.destroy();
+  }
+
+  createDepletedTexture(key) {
+    const g = this.make.graphics({ x: 0, y: 0, add: false });
+    g.fillStyle(0x1e241a, 1);
+    g.fillCircle(TILE / 2, TILE / 2, 8);
+    g.lineStyle(1, 0x0d0f0c, 0.6);
+    g.strokeCircle(TILE / 2, TILE / 2, 8);
+    g.generateTexture(key, TILE, TILE);
+    g.destroy();
+  }
+
+  createBuildTexture(key, color, isBed) {
     const g = this.make.graphics({ x: 0, y: 0, add: false });
     g.fillStyle(color, 1);
-    g.fillRoundedRect(4, 4, TILE - 8, TILE - 8, 6);
+    if (isBed) {
+      g.fillRoundedRect(4, 8, TILE - 8, TILE - 14, 4);
+      g.fillStyle(0xdedecb, 1);
+      g.fillRoundedRect(6, 10, 8, 8, 2);
+    } else {
+      g.fillRoundedRect(2, 2, TILE - 4, TILE - 4, 3);
+      g.lineStyle(1, 0x2b2318, 0.5);
+      g.strokeRect(2, 2, TILE - 4, (TILE - 4) / 2);
+    }
     g.lineStyle(2, 0x000000, 0.3);
-    g.strokeRoundedRect(4, 4, TILE - 8, TILE - 8, 6);
+    g.strokeRoundedRect(2, 2, TILE - 4, TILE - 4, 3);
     g.generateTexture(key, TILE, TILE);
     g.destroy();
   }
@@ -287,7 +450,10 @@ class MainScene extends Phaser.Scene {
       this.occupiedTiles.add(`${data.col},${data.row}`);
     });
 
+    // Skip survivors already rescued in a previous saved session
     survivorData.forEach(data => {
+      if (roster.some(r => r.name === data.name)) return;
+
       const x = data.col * TILE + TILE / 2;
       const y = data.row * TILE + TILE / 2;
       const sprite = this.add.image(x, y, 'survivor');
@@ -299,14 +465,7 @@ class MainScene extends Phaser.Scene {
         repeat: -1,
         ease: 'Sine.easeInOut'
       });
-      this.survivorSprites.push({
-        name: data.name,
-        perk: data.perk,
-        sprite,
-        x,
-        y,
-        rescued: false
-      });
+      this.survivorSprites.push({ name: data.name, perk: data.perk, sprite, x, y, rescued: false });
       this.occupiedTiles.add(`${data.col},${data.row}`);
     });
 
@@ -362,16 +521,49 @@ class MainScene extends Phaser.Scene {
 
     updateHud();
     updateHealthBar(this.playerHealth, PLAYER_MAX_HEALTH);
+    updateHungerBar(hunger, HUNGER_MAX);
     updateRosterPanel();
     this.syncBuildMenu();
     this.startDay();
+
+    // Hold gameplay at the title screen until the player presses Start
+    this.scene.pause();
+
+    // Wire the title screen's start button once (guard against duplicate scene creation)
+    if (!window.__deadReckoningStartWired) {
+      window.__deadReckoningStartWired = true;
+      const startBtn = document.getElementById('start-button');
+      const startScreen = document.getElementById('start-screen');
+      if (startBtn && startScreen) {
+        startBtn.addEventListener('click', () => {
+          startScreen.style.display = 'none';
+          const scene = game.scene.getScene('MainScene');
+          if (scene) scene.scene.resume();
+        });
+      }
+
+      const restartBtn = document.getElementById('restart-button');
+      if (restartBtn) {
+        restartBtn.addEventListener('click', () => {
+          window.location.reload();
+        });
+      }
+    }
+
+    if (savedGame) {
+      updateStatusLine(`continuing from day ${this.dayNumber} — press Start`);
+      const p = document.getElementById('start-detail');
+      if (p) p.textContent = `Welcome back — resuming on day ${this.dayNumber} with your saved supplies and survivors.`;
+    }
+  }
+
+  saveProgress() {
+    saveGame(this.dayNumber, hunger);
   }
 
   syncBuildMenu() {
     const menu = document.getElementById('build-menu');
-    if (menu) {
-      menu.style.display = this.buildMode ? 'flex' : 'none';
-    }
+    if (menu) menu.style.display = this.buildMode ? 'flex' : 'none';
     document.querySelectorAll('.build-option').forEach(el => {
       el.classList.toggle('selected', el.dataset.build === this.selectedBuild);
     });
@@ -397,6 +589,7 @@ class MainScene extends Phaser.Scene {
     updateStatusLine(`day ${this.dayNumber} — gather and build before nightfall`);
     this.tweens.add({ targets: this.nightOverlay, alpha: 0, duration: 2000 });
     this.zombies.getChildren().slice().forEach(z => z.destroy());
+    this.saveProgress();
   }
 
   startNight() {
@@ -426,7 +619,8 @@ class MainScene extends Phaser.Scene {
     const zombie = this.zombies.create(x, y, 'zombie');
     zombie.setCollideWorldBounds(true);
     zombie.body.setSize(TILE - 10, TILE - 10);
-    zombie.health = ZOMBIE_MAX_HEALTH;
+    zombie.health = ZOMBIE_BASE_HEALTH + Math.floor((this.dayNumber - 1) / 3);
+    zombie.speed = ZOMBIE_BASE_SPEED + (this.dayNumber - 1) * ZOMBIE_SPEED_PER_DAY;
   }
 
   // ---------- Combat ----------
@@ -440,9 +634,7 @@ class MainScene extends Phaser.Scene {
       this.playerHealth -= damage;
       updateHealthBar(this.playerHealth, PLAYER_MAX_HEALTH);
       this.cameras.main.shake(120, 0.004);
-      if (this.playerHealth <= 0) {
-        this.handleGameOver();
-      }
+      if (this.playerHealth <= 0) this.handleGameOver();
     }
   }
 
@@ -474,12 +666,13 @@ class MainScene extends Phaser.Scene {
     this.gameOver = true;
     this.zombies.getChildren().forEach(z => z.setVelocity(0));
     this.player.setVelocity(0);
-    updateStatusLine(`you died on night ${this.dayNumber} — refresh to try again`);
-    this.add.text(this.player.x, this.player.y - 40, 'YOU DIED', {
-      fontFamily: 'Courier New',
-      fontSize: '20px',
-      color: '#c96a5a'
-    }).setOrigin(0.5).setDepth(30);
+    updateStatusLine(`you died on night ${this.dayNumber}`);
+    clearSave();
+
+    const overlay = document.getElementById('gameover-screen');
+    const detail = document.getElementById('gameover-detail');
+    if (detail) detail.textContent = `You survived to day ${this.dayNumber} with ${roster.length} survivor(s) at your side.`;
+    if (overlay) overlay.style.display = 'flex';
   }
 
   // ---------- Resources ----------
@@ -507,10 +700,11 @@ class MainScene extends Phaser.Scene {
     const amount = Phaser.Math.Between(cfg.min, cfg.max) + bonus;
     inventory[cfg.key] += amount;
     updateHud();
+    this.saveProgress();
 
     node.depleted = true;
     node.sprite.setTexture(node.type + '_depleted');
-    node.sprite.setAlpha(0.5);
+    node.sprite.setAlpha(0.6);
 
     node.respawnTimer = this.time.delayedCall(cfg.respawnMs, () => {
       node.depleted = false;
@@ -545,6 +739,7 @@ class MainScene extends Phaser.Scene {
     survivor.sprite.destroy();
     roster.push({ name: survivor.name, perk: survivor.perk });
     updateRosterPanel();
+    this.saveProgress();
 
     const perkInfo = PERKS[survivor.perk];
     this.showFloatText(survivor.x, survivor.y, `${survivor.name} rescued!`, '#7ab5d9');
@@ -573,13 +768,12 @@ class MainScene extends Phaser.Scene {
     const cfg = BUILDABLES[structure.key];
     refund(cfg.cost, DEMOLISH_REFUND_RATE);
 
-    if (structure.body) {
-      structure.body.destroy();
-    }
+    if (structure.body) structure.body.destroy();
     structure.sprite.destroy();
 
     this.occupiedTiles.delete(`${structure.col},${structure.row}`);
     this.placedList = this.placedList.filter(s => s !== structure);
+    this.saveProgress();
 
     this.showFloatText(
       structure.col * TILE + TILE / 2,
@@ -638,6 +832,7 @@ class MainScene extends Phaser.Scene {
 
     this.occupiedTiles.add(`${col},${row}`);
     this.placedList.push({ key, sprite, body, col, row });
+    this.saveProgress();
     this.showFloatText(x, y, `${cfg.label} built`, '#b5c99a');
   }
 
@@ -700,7 +895,6 @@ class MainScene extends Phaser.Scene {
         this.player.setVelocity((vx / len) * speed, (vy / len) * speed);
       }
 
-      // Prompt priority: survivor rescue > demolish own structure > gather resource
       this.nearbySurvivor = this.getNearbySurvivor();
       this.nearbyStructure = this.nearbySurvivor ? null : this.getNearbyStructure();
       this.nearbyNode = (this.nearbySurvivor || this.nearbyStructure) ? null : this.getNearbyNode();
@@ -709,28 +903,19 @@ class MainScene extends Phaser.Scene {
         this.promptText.setText(`Press E to rescue ${this.nearbySurvivor.name}`);
         this.promptText.setVisible(true);
         this.promptText.setPosition(this.nearbySurvivor.x - 55, this.nearbySurvivor.y - TILE - 6);
-
-        if (Phaser.Input.Keyboard.JustDown(this.interactKey)) {
-          this.rescueSurvivor(this.nearbySurvivor);
-        }
+        if (Phaser.Input.Keyboard.JustDown(this.interactKey)) this.rescueSurvivor(this.nearbySurvivor);
       } else if (this.nearbyStructure) {
         const cfg = BUILDABLES[this.nearbyStructure.key];
         const refundAmt = Object.entries(cfg.cost).map(([k, v]) => `${Math.ceil(v * DEMOLISH_REFUND_RATE)} ${k}`).join(', ');
         this.promptText.setText(`Press R to demolish ${cfg.label} (+${refundAmt})`);
         this.promptText.setVisible(true);
         this.promptText.setPosition(this.nearbyStructure.sprite.x - 70, this.nearbyStructure.sprite.y - TILE - 6);
-
-        if (Phaser.Input.Keyboard.JustDown(this.demolishKey)) {
-          this.demolishStructure(this.nearbyStructure);
-        }
+        if (Phaser.Input.Keyboard.JustDown(this.demolishKey)) this.demolishStructure(this.nearbyStructure);
       } else if (this.nearbyNode) {
         this.promptText.setText('Press E to gather');
         this.promptText.setVisible(true);
         this.promptText.setPosition(this.nearbyNode.x - 40, this.nearbyNode.y - TILE - 6);
-
-        if (Phaser.Input.Keyboard.JustDown(this.interactKey)) {
-          this.gatherNode(this.nearbyNode);
-        }
+        if (Phaser.Input.Keyboard.JustDown(this.interactKey)) this.gatherNode(this.nearbyNode);
       } else {
         this.promptText.setVisible(false);
       }
@@ -743,12 +928,13 @@ class MainScene extends Phaser.Scene {
       this.promptText.setVisible(false);
     }
 
-    // Zombie AI: move toward player
+    // Zombie AI: move toward player at their own (difficulty-scaled) speed
     this.zombies.getChildren().forEach(zombie => {
       const dx = this.player.x - zombie.x;
       const dy = this.player.y - zombie.y;
       const len = Math.sqrt(dx * dx + dy * dy) || 1;
-      zombie.setVelocity((dx / len) * ZOMBIE_SPEED, (dy / len) * ZOMBIE_SPEED);
+      const spd = zombie.speed || ZOMBIE_BASE_SPEED;
+      zombie.setVelocity((dx / len) * spd, (dy / len) * spd);
     });
 
     // Medic perk: slow passive regen
@@ -757,6 +943,33 @@ class MainScene extends Phaser.Scene {
         this.lastRegenTime = time;
         this.playerHealth = Math.min(PLAYER_MAX_HEALTH, this.playerHealth + 2);
         updateHealthBar(this.playerHealth, PLAYER_MAX_HEALTH);
+      }
+    }
+
+    // Hunger decay + auto-eat
+    if (time - this.lastHungerDecay > HUNGER_DECAY_INTERVAL_MS) {
+      this.lastHungerDecay = time;
+      hunger = Math.max(0, hunger - 1);
+
+      if (hunger <= HUNGER_AUTO_EAT_THRESHOLD && inventory.food > 0) {
+        inventory.food -= 1;
+        hunger = Math.min(HUNGER_MAX, hunger + HUNGER_AUTO_EAT_GAIN);
+        updateHud();
+        this.showFloatText(this.player.x, this.player.y, 'ate food', '#c9a25a');
+      }
+
+      updateHungerBar(hunger, HUNGER_MAX);
+      this.saveProgress();
+    }
+
+    // Starvation damage when hunger is empty and there's no food to eat
+    if (hunger <= 0) {
+      if (time - this.lastStarveDamage > STARVE_INTERVAL_MS) {
+        this.lastStarveDamage = time;
+        this.playerHealth -= STARVE_DAMAGE;
+        updateHealthBar(this.playerHealth, PLAYER_MAX_HEALTH);
+        this.showFloatText(this.player.x, this.player.y, 'starving!', '#c96a5a');
+        if (this.playerHealth <= 0) this.handleGameOver();
       }
     }
 
@@ -781,10 +994,7 @@ const config = {
   backgroundColor: '#0d0f0c',
   physics: {
     default: 'arcade',
-    arcade: {
-      gravity: { y: 0 },
-      debug: false
-    }
+    arcade: { gravity: { y: 0 }, debug: false }
   },
   scene: MainScene
 };
